@@ -34,21 +34,30 @@ class DownloadManager():
                print("No tasks queued")
                return
           self.running = True
-          display_thread = threading.Thread(target=live_display, args=(self,), daemon=True)
-          display_thread.start()
           self.executor = ThreadPoolExecutor(max_workers=maxWorkers)
           for task in self.tasks:
-               self.executor.submit(task.download_retry, retries=3)
-          self.executor.shutdown(wait=True)
-          self.running = False
+               task.event.set()
+               self.executor.submit(task.download)
      def pause_all(self):
           for task in self.tasks:
                task.pause()
+     def pause_individual(self,uniqueChars):
+          for task in self.tasks:
+               if task.uniqueChars == uniqueChars:
+                    task.pause()
+                    return
+          print("Task not found.")
      def get_status(self):
           return [task.get_status() for task in self.tasks]
      def resume_all(self):
           for task in self.tasks:  
                task.resume()
+     def resume_individual(self,uniqueChars):
+          for task in self.tasks:
+               if task.uniqueChars == uniqueChars:
+                    task.resume()
+                    return
+          print("Task not found.")
      def shutdown(self):
           self.pause_all()
           if hasattr(self, 'executor'):
@@ -74,9 +83,9 @@ def cli():
                     UrlFinder("datanodes",[url]).queue_Url()
                elif parts[0] == "status" and len(parts) == 2:
                     if parts[1] == "all":
-                         for task in manager.tasks:
-                              if task.status != "Pending":
-                                   print(task.get_status())
+                         for items in manager.get_status():
+                              if items:
+                                   print(f"{items[0]}: {items[1]} - Speed = {items[2]} eta = {items[3]}")
                     else:
                          for task in manager.tasks:
                               if task.uniqueChars == str(parts[1]):
@@ -101,26 +110,16 @@ def cli():
                     print("add <url> - Add URL to queue")
                     print("exit/quit - Exit the program")
                
-               elif parts[0] == "pause" and len(parts) == 2:
-                    found = False
-                    for task in manager.tasks:
-                         if task.uniqueChars == parts[1]:
-                              task.pause()
-                              found = True
-                    if not found:
-                         print("Task not found.")
-               elif parts[0] == "resume" and len(parts) == 2:
-                    found = False
-                    for task in manager.tasks:
-                         if task.uniqueChars == parts[1]:
-                              task.resume()
-                              found = True
-                    if not found:
-                         print("Task not found.")
-               elif cmd == "pause":
-                    manager.pause_all()
-               elif cmd == "resume":
-                    manager.resume_all()
+               elif parts[0] == "pause":
+                    if len(parts) == 1:
+                         manager.pause_all()
+                    else:
+                         manager.pause_individual(parts[1])
+               elif parts[0] == "resume":
+                    if len(parts) == 1:
+                         manager.resume_all()
+                    else:
+                         manager.resume_individual(parts[1])
                else:
                     print("Invalid command.")
 
@@ -128,6 +127,7 @@ def cli():
 class DownloadTask():
      def __init__(self,url,fname,downloaded=0,total_size=0,status="Pending",event=None):
           self.url = json.loads(urllib.parse.unquote(url))["url"]
+          self.speed = 0
           self.fname = fname
           self.status = status
           self.downloaded = downloaded
@@ -145,6 +145,11 @@ class DownloadTask():
           if self.event:
                self.event.set()
           print("Resuming download...")
+     def get_eta(self):
+          if self.speed>0:
+               eta = (self.total_size - self.downloaded )/ self.speed
+               return time.strftime("%H:%M:%S", time.gmtime(eta))
+               
      def download_retry(self, retries=3):
           for attempt in range(retries):
                try:
@@ -169,17 +174,25 @@ class DownloadTask():
                response = requests.get(self.url,headers={'Range': f'bytes={start_byte}-'},stream=True,timeout=(10,None))
                total_size = int(response.headers.get('content-length', 0))
                self.total_size = total_size
+               current_time = time.time()
+               current_size = start_byte
                with open(f"../{self.fname}",'ab') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
                          if self.event and not self.event.is_set():
                               print("Download paused. Waiting to resume...")
                               self.event.wait()
                          self.downloaded += len(chunk)
                          f.write(chunk)
+                         now = time.time()
+                         elapsed = now - current_time
+                         if elapsed >= 1:
+                              self.speed = (self.downloaded - current_size) / elapsed
+                              current_time = now
+                              current_size = self.downloaded
                          
                self.status = "COMPLETED"
           except Exception as e:
-               raise  # Re-raise for retry logic to handle
+               raise e
                          
      def pause(self):
           self.status = "Paused"
@@ -192,8 +205,10 @@ class DownloadTask():
           else:
                return 0
      def get_status(self):
-          return f"{self.uniqueChars}: {self.status} - {self.get_progress():.2f}%"
-
+          if self.status == "Downloading":
+               return [self.uniqueChars, f"{self.get_progress():.2f}%", f"{self.speed/1024:.2f} KB/s", self.get_eta()]
+          else:
+               return
 class UrlFinder():
      def __init__(self,pluggin,Urls):
           self.Urls = Urls
