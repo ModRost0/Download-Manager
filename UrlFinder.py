@@ -123,7 +123,6 @@ def cli():
                else:
                     print("Invalid command.")
 
-
 class DownloadTask():
      def __init__(self,url,fname,downloaded=0,total_size=0,status="Pending",event=None):
           self.url = json.loads(urllib.parse.unquote(url))["url"]
@@ -134,12 +133,19 @@ class DownloadTask():
           self.total_size = total_size
           self.event = threading.Event()
           self.uniqueChars = str(uuid.uuid4())[:8]
-     def check_resume(self):
+          self.accepts_range_headers = None
+          self.download_chunk_per_thread = 0
+          self.num_of_threads = 4
+          self.lock = threading.Lock()
+     def check_size(self):
           if os.path.exists(self.fname):
                return os.path.getsize(self.fname)
           else:
                self.status = "Downloading"
                return 0
+     def check_accepts_range_headers(self):
+          res = s.head(self.url)
+          return res.headers.get("Accept-Ranges",None)
      def resume(self):
           self.status = "Downloading"
           if self.event:
@@ -149,13 +155,12 @@ class DownloadTask():
           if self.speed>0:
                eta = (self.total_size - self.downloaded )/ self.speed
                return time.strftime("%H:%M:%S", time.gmtime(eta))
-               
      def download_retry(self, retries=3):
           for attempt in range(retries):
                try:
                     self.status = "Downloading" if attempt == 0 else "Retrying"
                     self.download()
-                    if self.status == "COMPLETED":
+                    if self.status == "Completed":
                          return
                except Exception as e:
                     if attempt < retries - 1:
@@ -165,35 +170,87 @@ class DownloadTask():
                     else:
                          self.status = "Failed"
                          print(f"Failed to download {self.fname} after {retries} attempts: {e}")
-                         return    
+                         return
+                    
      def download(self):
+          if self.total_size == 0:
+               self.initialize(4)
           try:
-               print(f"Downloading {self.fname}...")
-               start_byte = self.check_resume()
-               self.downloaded = start_byte
-               response = requests.get(self.url,headers={'Range': f'bytes={start_byte}-'},stream=True,timeout=(10,None))
-               total_size = int(response.headers.get('content-length', 0))
-               self.total_size = total_size
-               current_time = time.time()
-               current_size = start_byte
-               with open(f"../{self.fname}",'ab') as f:
-                    for chunk in response.iter_content(chunk_size=1024 * 1024):
-                         if self.event and not self.event.is_set():
-                              print("Download paused. Waiting to resume...")
-                              self.event.wait()
-                         self.downloaded += len(chunk)
-                         f.write(chunk)
-                         now = time.time()
-                         elapsed = now - current_time
-                         if elapsed >= 1:
-                              self.speed = (self.downloaded - current_size) / elapsed
-                              current_time = now
-                              current_size = self.downloaded
-                         
-               self.status = "COMPLETED"
+               if self.check_accepts_range_headers() != "bytes":
+                    print(f"Downloading {self.fname}...")
+                    start_byte = self.check_size()
+                    self.downloaded = start_byte
+                    response = requests.get(self.url,stream=True,timeout=(10,None))
+                    current_time = time.time()
+                    current_size = start_byte
+                    with open(f"../{self.fname}.unfinished",'ab') as f:
+                         for chunk in response.iter_content(chunk_size=1024 * 1024):
+                              if self.event and not self.event.is_set():
+                                   print("Download paused. Waiting to resume...")
+                                   self.event.wait()
+                              self.downloaded += len(chunk)
+                              f.write(chunk)
+                              now = time.time()
+                              elapsed = now - current_time
+                              if elapsed >= 1:
+                                   self.speed = (self.downloaded - current_size) / elapsed
+                                   current_time = now
+                                   current_size = self.downloaded
+                    os.rename(f"../{self.fname}.unfinished", f"../{self.fname}")       
+                    self.status = "Completed"
+               else:
+                    print(f"Download_chunking {self.fname}")
+                    threads = []
+                    for i in range(self.num_of_threads):
+                         start = self.download_chunk_per_thread * (i)
+                         download_chunk_per_thread = self.download_chunk_per_thread * (i+1)
+                         if download_chunk_per_thread > self.total_size:
+                              download_chunk_per_thread = self.total_size
+                         if i == self.num_of_threads - 1:
+                              download_chunk_per_thread = self.total_size
+                         t = threading.Thread(target=self.download_chunk, args=(download_chunk_per_thread,start))
+                         threads.append(t)
+                         t.start()
+                    for t in threads:
+                         t.join()
+                    self.status = "Completed"
+                    os.rename(f"../{self.fname}.Unfinished", f"../{self.fname}")                    
           except Exception as e:
                raise e
-                         
+     def initialize(self,n):
+            with open(f"../{self.fname}.Unfinished", 'wb') as f:
+               length = int(requests.head(self.url).headers.get('Content-Length', 0))
+               self.total_size = length
+               self.download_chunk_per_thread = int(length//n)
+               self.num_of_threads = n
+               self.global_download_chunk_per_thread = self.download_chunk_per_thread
+               f.truncate(length)
+               f.close()
+     def download_chunk(self,download_chunk_per_thread,start):
+               headers = {"Range":f"bytes={start}-{download_chunk_per_thread-1}"}
+               now = time.time()
+               res = requests.get(self.url, stream=True, headers=headers)
+               print(self.total_size)
+               with open(f"../{self.fname}.Unfinished", 'r+b') as f:
+                    f.seek(start)
+                    print(f"Starting download for bytes {start} to {download_chunk_per_thread - 1}")
+                    print(f"Initial file position: {f.tell()} bytes")
+                    for chunk in res.iter_content(chunk_size=1024*1024):
+                         if self.event and not self.event.is_set():
+                              self.event.wait()
+                         if chunk:
+                              old_downloaded = self.downloaded
+                              f.write(chunk)
+                              current_time = time.time()
+                              elapsed = current_time - now
+                              if elapsed > 1:
+                                   with self.lock:
+                                        self.downloaded += len(chunk)
+                                        self.speed = (self.downloaded - old_downloaded) / elapsed
+                              else:
+                                   with self.lock:
+                                        self.downloaded += len(chunk)
+                                        self.speed = 0
      def pause(self):
           self.status = "Paused"
           if self.event:
