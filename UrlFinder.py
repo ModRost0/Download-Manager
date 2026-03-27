@@ -1,15 +1,21 @@
 from downloadTask import DownloadTask
 import requests
 s = requests.Session()
+s.headers.update({"User-Agent": "Mozilla/5.0"})
 from downloadManager import manager
 class UrlFinder():
      def __init__(self,pluggin,Urls):
           self.Urls = Urls
           self.pluggin = pluggin
      def queue_Url(self):
-          if self.pluggin == "datanodes":
+          if self.pluggin == "normal":
+               for item in self.Urls:
+                    self.normal_download(item)
+          elif self.pluggin == "datanodes":
                for item in self.Urls:
                     self.crawl_datanodes(item)
+     def normal_download(self,url):
+          manager.add_task(DownloadTask(url,"test.rar"))
      def crawl_datanodes(self, url):
           dataFromUrl = url.split('/')
           uniqueChars = dataFromUrl[3]

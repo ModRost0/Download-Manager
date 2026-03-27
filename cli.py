@@ -26,15 +26,18 @@ def cli():
                 print("Usage: add <url>")
 
         elif command == "status":
-            if len(args) == 0 or args[0] == "all":
+            if len(args) == 0:
                 manager.get_status()
             elif len(args) == 1:
-                for task in manager.tasks:
-                    if task.uniqueChars == args[0]:
+                if args[0] == 'all':
+                    for task in manager.tasks:
                         print(task.get_status())
                         break
                 else:
-                    print("Task not found.")
+                    for task in manager.tasks:
+                        if task.uniqueChars == args[0]:
+                            print(task.get_status())
+                            break
             else:
                 print("Usage: status <id|all>")
 
@@ -74,4 +77,3 @@ def cli():
 
         else:
             print("Invalid command.")
-cli()

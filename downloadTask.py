@@ -1,17 +1,26 @@
 import time
 import os
 import requests
-import json
 import threading
 import urllib
 import uuid
+import json
 from concurrent.futures import ThreadPoolExecutor
-
 TEMP_EXT = ".unfinished"
-
+s = requests.Session()
+headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Encoding": "identity",
+        "Connection": "keep-alive"
+    }
+s.headers.update(headers)
 class DownloadTask():
     def __init__(self, url, fname, downloaded=0, total_size=0, status="Pending", event=None):
-        self.url = json.loads(urllib.parse.unquote(url))["url"]
+        try:
+            self.url = json.loads(urllib.parse.unquote(url))["url"]
+        except Exception as e:
+            print(e)
+            self.url = url
         self.speed = 0
         self.fname = fname
         self.status = status
@@ -20,23 +29,22 @@ class DownloadTask():
         self.event = threading.Event()
         self.uniqueChars = str(uuid.uuid4())[:8]
         self.accepts_range_headers = None
-        self.download_chunk_per_thread = 0
-        self.num_of_threads = 3
+        self.length_of_chunks = 0
+        self.num_of_threads = 2
         self.lock = threading.Lock()
         self.event.set()
         self.executor = ThreadPoolExecutor(max_workers=self.num_of_threads)
-
-    def check_existance(self):
-        if os.path.exists(f"../{self.fname}.{TEMP_EXT}"):
-            return os.path.getsize(f'../{self.fname}.{TEMP_EXT}')
-        else:
-            self.status = "Downloading"
-            return 0
-
+        self.chunks_data = []
     def check_accepts_range_headers(self):
-        res = requests.head(self.url)
-        return res.headers.get("Accept-Ranges", None)
-
+        try:
+            res = s.head(self.url)
+            return res.headers.get("Accept-Ranges", None)
+        except Exception as e:
+            print(e)
+            response = s.get(self.url, stream=True, timeout=10)
+            response.close()
+            res = response.headers.get("Accept-Ranges", None)
+            return res
     def resume(self):
         self.status = "Downloading"
         if self.event:
@@ -51,104 +59,108 @@ class DownloadTask():
     def download_retry(self, retries=3):
         for attempt in range(retries):
             try:
-                self.status = "Downloading" if attempt == 0 else "Retrying"
                 self.download()
                 if self.status == "Completed":
                     return
             except Exception as e:
+                self.status = 'Retrying'
                 if attempt < retries - 1:
                     wait_time = 2 ** attempt
+                    self.downloaded = sum(
+                        chunk[0] - (i * self.length_of_chunks)
+                        for i, chunk in enumerate(self.chunks_data)
+                    )
                     print(f"Attempt {attempt + 1} failed. Retrying in {wait_time}s...")
                     time.sleep(wait_time)
                 else:
                     self.status = "Failed"
-                    print(f"Failed to download {self.fname} after {retries} attempts: {e}")
-                    return
-
+                    print(f"Failed after {retries} attempts: {e}")
+    def check_existence(self):
+        if(os.path.exists(f'../{self.fname}')):
+            return True
+        else:
+            return False
     def download(self):
-        if self.total_size == 0:
-            self.initialize(3)
-
         try:
-            if self.check_accepts_range_headers() != "bytes":
-                print(f"Downloading {self.fname}...")
-                start_byte = self.check_existance()
-                self.downloaded = start_byte
-                response = requests.get(self.url, stream=True, timeout=(10, None))
-                current_time = time.time()
-                current_size = start_byte
-                self.status = "Downloading"
+            bool_range = self.check_accepts_range_headers()
+            if self.total_size == 0:
+                self.initialize(self.num_of_threads)
+            if bool_range != "bytes":
+                    print(f"Downloading {self.fname}...")
+                    response = s.get(self.url, stream=True, timeout=(10, None))
+                    current_time = time.time()
+                    current_size = 0
+                    self.status = "Downloading"
+                    with open(f"../{self.fname}{TEMP_EXT}", 'ab') as f:
+                        for chunk in response.iter_content(chunk_size=1024 * 1024):
+                            if self.event and not self.event.is_set():
+                                print("Download paused. Waiting to resume...")
+                                self.event.wait()
 
-                with open(f"../{self.fname}.unfinished", 'ab') as f:
-                    for chunk in response.iter_content(chunk_size=1024 * 1024):
-                        if self.event and not self.event.is_set():
-                            print("Download paused. Waiting to resume...")
-                            self.event.wait()
+                            self.downloaded += len(chunk)
+                            f.write(chunk)
 
-                        self.downloaded += len(chunk)
-                        f.write(chunk)
+                            now = time.time()
+                            elapsed = now - current_time
 
-                        now = time.time()
-                        elapsed = now - current_time
-
-                        if elapsed >= 1:
-                            self.speed = (self.downloaded - current_size) / elapsed
-                            current_time = now
-                            current_size = self.downloaded
-
-                self.status = "Completed"
-
+                            if elapsed >= 1:
+                                self.speed = (self.downloaded - current_size) / elapsed
+                                current_time = now
+                                current_size = self.downloaded
+                    os.rename(f"../{self.fname}{TEMP_EXT}", f"../{self.fname}")
+                    self.status = "Completed"
             else:
-                self.status = "Downloading"
-                self.chunks_data = []
-                threading.Thread(target=self.track_speed, daemon=True).start()
-                for i in range(self.num_of_threads):
-                    start = i * self.length_of_chunks
-                    end = start + self.length_of_chunks - 1 if i < self.num_of_threads - 1 else self.total_size - 1
-                    self.chunks_data.append([start, end])
-                futures = []
-                
-                for i, chunk in enumerate(self.chunks_data):
-                    futures.append(self.executor.submit(self.download_chunk, chunk, i))
-
-                for f in futures:
-                    f.result()
-
-                os.rename(f"../{self.fname}.{TEMP_EXT}", f"../{self.fname}")
-                self.status = "Completed"
-                self.executor.shutdown()
-
+                    print(self.chunks_data)
+                    if self.status != 'Downloading':
+                        for i in range(self.num_of_threads):
+                            start = i * self.length_of_chunks
+                            end = start + self.length_of_chunks - 1 if i < self.num_of_threads - 1 else self.total_size - 1
+                            self.chunks_data.append([start, end])
+                        self.status = 'Downloading'
+                    threading.Thread(target=self.track_speed, daemon=True).start()
+                    futures = []
+                    for i, chunk in enumerate(self.chunks_data):
+                        futures.append(self.executor.submit(self.download_chunk, chunk, i))
+                    for f in futures:
+                        f.result()
+                    os.rename(f"../{self.fname}{TEMP_EXT}", f"../{self.fname}")
+                    self.status = "Completed"
         except Exception as e:
-            raise e
-
+            print(f'download lvl {e}')
+            raise
     def download_chunk(self, data, thread_num):
-        print(f"Download_chunking {self.fname}")
-        start = data[0]
-        end = data[1]
-        print(f'{start},{end},{thread_num}')
-
-        headers = {
-            "Range": f"bytes={start}-{end}"
-        }
-
-        response = requests.get(self.url, stream=True, headers=headers, timeout=(10, None))
-
-        with open(f'../{self.fname}.{TEMP_EXT}', 'r+b') as f:
-            f.seek(start)
-            for chunk in response.iter_content(1024 * 1024):
-                f.write(chunk)
-                self.chunks_data[thread_num][0] += len(chunk)
-
-                with self.lock:
-                    self.downloaded += len(chunk)
-
+        try:
+            print(f"Download_chunking {self.fname}")
+            start = data[0]
+            end = data[1]
+            headers = {
+                "Range": f"bytes={start}-{end}"
+            }
+            response = s.get(self.url, stream=True, headers=headers, timeout=(60, None))
+            with open(f'../{self.fname}{TEMP_EXT}', 'r+b') as f:
+                f.seek(start)
+                for chunk in response.iter_content(1024 * 1024):
+                    with self.lock:
+                        f.write(chunk)
+                        self.chunks_data[thread_num][0] += len(chunk)
+                        self.downloaded += len(chunk)
+        except Exception as e:
+            print(f'chunk lvl {e}')
+            raise
     def initialize(self, n):
-        with open(f"../{self.fname}.{TEMP_EXT}", 'wb') as f:
-            length = int(requests.head(self.url).headers.get('Content-Length', 0))
-            self.total_size = length
-            self.length_of_chunks = int(length // n)
-            f.truncate(length)
-
+        try:
+            with open(f"../{self.fname}{TEMP_EXT}", 'wb') as f:
+                length = int(s.head(self.url).headers.get('Content-Length', 0))
+                self.total_size = length
+                self.length_of_chunks = int(length // n)
+                f.truncate(length)
+        except Exception as e:
+            with open(f"../{self.fname}{TEMP_EXT}", 'wb') as f:
+                response = s.get(self.url, stream=True, timeout=10)
+                response.close()
+                self.total_size = response.headers.get('Content-Length', 0)
+                self.length_of_chunks = int(self.total_size/n)
+                f.truncate(self.total_size)
     def track_speed(self):
         last_downloaded = self.downloaded
         speeds = []
@@ -157,19 +169,16 @@ class DownloadTask():
             time.sleep(1)
             self.speed = self.downloaded - last_downloaded
             last_downloaded = self.downloaded
-
             speeds.append(self.speed)
             if len(speeds) > 10:
                 speeds.pop(0)
-
             self.speed = (sum(speeds) / len(speeds))
 
     def pause(self):
         self.status = "Paused"
-        if self.event:
-            self.event.clear()
         print("Download paused.")
-
+        if self.event:
+            self.event.wait()
     def get_progress(self):
         if self.total_size > 0:
             return (self.downloaded / self.total_size) * 100
