@@ -27,10 +27,11 @@ class DownloadTask():
         self.downloaded = downloaded
         self.total_size = total_size
         self.event = threading.Event()
+        self.cancel_event = threading.Event()
         self.uniqueChars = str(uuid.uuid4())[:8]
         self.accepts_range_headers = None
         self.length_of_chunks = 0
-        self.num_of_threads = 2
+        self.num_of_threads = 3
         self.lock = threading.Lock()
         self.event.set()
         self.executor = ThreadPoolExecutor(max_workers=self.num_of_threads)
@@ -59,17 +60,21 @@ class DownloadTask():
     def download_retry(self, retries=3):
         for attempt in range(retries):
             try:
+                if self.cancel_event.is_set():
+                    self.status = "Cancelled"
+                    print("Download cancelled.")
+                    return
                 self.download()
-                if self.status == "Completed":
+                if self.status == "Completed" or self.status == "Cancelled":
                     return
             except Exception as e:
+                if self.cancel_event.is_set():
+                    self.status = "Cancelled"
+                    print("Download cancelled.")
+                    return
                 self.status = 'Retrying'
                 if attempt < retries - 1:
                     wait_time = 2 ** attempt
-                    self.downloaded = sum(
-                        chunk[0] - (i * self.length_of_chunks)
-                        for i, chunk in enumerate(self.chunks_data)
-                    )
                     print(f"Attempt {attempt + 1} failed. Retrying in {wait_time}s...")
                     time.sleep(wait_time)
                 else:
@@ -96,13 +101,10 @@ class DownloadTask():
                             if self.event and not self.event.is_set():
                                 print("Download paused. Waiting to resume...")
                                 self.event.wait()
-
                             self.downloaded += len(chunk)
                             f.write(chunk)
-
                             now = time.time()
                             elapsed = now - current_time
-
                             if elapsed >= 1:
                                 self.speed = (self.downloaded - current_size) / elapsed
                                 current_time = now
@@ -111,7 +113,7 @@ class DownloadTask():
                     self.status = "Completed"
             else:
                     print(self.chunks_data)
-                    if self.status != 'Downloading':
+                    if self.status != 'Downloading' and self.status != 'Retrying':
                         for i in range(self.num_of_threads):
                             start = i * self.length_of_chunks
                             end = start + self.length_of_chunks - 1 if i < self.num_of_threads - 1 else self.total_size - 1
@@ -120,12 +122,20 @@ class DownloadTask():
                     threading.Thread(target=self.track_speed, daemon=True).start()
                     futures = []
                     for i, chunk in enumerate(self.chunks_data):
-                        futures.append(self.executor.submit(self.download_chunk, chunk, i))
+                        futures.append(self.executor.submit(self.download_chunk, chunk, i,))
                     for f in futures:
                         f.result()
+                    if self.cancel_event.is_set():
+                        self.status = "Cancelled"
+                        print("Download cancelled.")
+                        return
                     os.rename(f"../{self.fname}{TEMP_EXT}", f"../{self.fname}")
                     self.status = "Completed"
         except Exception as e:
+            if self.cancel_event.is_set():
+                self.status = "Cancelled"
+                print("Download cancelled.")
+                return
             print(f'download lvl {e}')
             raise
     def download_chunk(self, data, thread_num):
@@ -136,10 +146,15 @@ class DownloadTask():
             headers = {
                 "Range": f"bytes={start}-{end}"
             }
-            response = s.get(self.url, stream=True, headers=headers, timeout=(60, None))
+            if self.cancel_event.is_set():
+                return
+            response = s.get(self.url, stream=True, headers=headers, timeout=(5,5 ))
             with open(f'../{self.fname}{TEMP_EXT}', 'r+b') as f:
                 f.seek(start)
-                for chunk in response.iter_content(1024 * 1024):
+                for chunk in response.iter_content(1024 * 512):
+                    if self.cancel_event.is_set():
+                        response.close()
+                        return
                     with self.lock:
                         f.write(chunk)
                         self.chunks_data[thread_num][0] += len(chunk)
@@ -176,14 +191,19 @@ class DownloadTask():
 
     def pause(self):
         self.status = "Paused"
-        print("Download paused.")
-        if self.event:
-            self.event.wait()
+        self.event.clear()
     def get_progress(self):
         if self.total_size > 0:
             return (self.downloaded / self.total_size) * 100
         return 0
-
+    def cancel(self):
+        self.cancel_event.set()
+        print("Cancelling download...")
+        try:
+            self.executor.shutdown(wait=False, cancel_futures=True)
+        except:
+            pass
+        self.status = "Cancelled"  
     def get_status(self):
             return [
             self.uniqueChars,

@@ -7,7 +7,7 @@ class DownloadManager:
     def __init__(self, running=False):
         self.tasks = []
         self.running = running
-        self.executor = ThreadPoolExecutor(max_workers=4)
+        self.executor = ThreadPoolExecutor(max_workers=3)
         self.futures = []
         self.meta_data = {}
         self.progress_running = False
@@ -36,8 +36,8 @@ class DownloadManager:
                 task.event.set()
                 self.executor.submit(task.download_retry)
                 if not self.progress_running:
-                    threading.Thread(target=self.dump_progress,args=['back_ground'], daemon=True).start()
                     self.progress_running = True
+                    threading.Thread(target=self.dump_progress,args=['back_ground'], daemon=True).start()  
             else: 
                 print(task.get_status())       
     def load_progress(self,task):
@@ -61,6 +61,8 @@ class DownloadManager:
         final_path = 'meta_data.json'
         if mode != 'instant':
             while True:
+                if self.progress_running == False:
+                    return
                 time.sleep(5)
                 for i,task in enumerate(self.tasks):
                         self.meta_data[i] = {"data" : task.chunks_data,
@@ -132,7 +134,8 @@ class DownloadManager:
         print(f'remaining{total_size/1024 - total_progress/1024}')
 
     def shutdown(self):
-        self.pause_all()
+        for task in self.tasks:
+            task.cancel()
         self.running = False
         self.executor.shutdown(wait=False)
         return
