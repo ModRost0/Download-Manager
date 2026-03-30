@@ -1,12 +1,20 @@
 from downloadTask import DownloadTask
 import requests
+from plugins import reallyff, datanodes
 s = requests.Session()
 s.headers.update({"User-Agent": "Mozilla/5.0"})
 from downloadManager import manager
 class UrlFinder():
-     def __init__(self,pluggin,Urls):
+     def __init__(self,Urls):
           self.Urls = Urls
-          self.pluggin = pluggin
+          self.pluggin = self.find_url_host()
+     def find_url_host(self):
+          for url in self.Urls:
+               if url.split('//')[1].startswith("datanodes"):
+                    return "datanodes"
+               elif url.split('//')[1].startswith("fuckingfast"):
+                    return "reallyff"
+          return "normal"
      def queue_Url(self):
           if self.pluggin == "normal":
                for item in self.Urls:
@@ -14,24 +22,14 @@ class UrlFinder():
           elif self.pluggin == "datanodes":
                for item in self.Urls:
                     self.crawl_datanodes(item)
+          elif self.pluggin == "reallyff":
+               for item in self.Urls:
+                    self.crawl_reallyff(item)
      def normal_download(self,url):
           manager.add_task(DownloadTask(url,"test.rar"))
      def crawl_datanodes(self, url):
-          dataFromUrl = url.split('/')
-          uniqueChars = dataFromUrl[3]
-          fname = dataFromUrl[4]
-          payload2 = {
-          "op": "download2",
-          "id": f"{uniqueChars}",
-          "rand": "",
-          "referer": "https://fitgirl-repacks.site/",
-          "method_free": "Free Download >>",
-          "method_premium": "",
-          "g_captch__a": "1"}
-          try:
-               down2 = s.post('https://datanodes.to/download',data=payload2,timeout=10)
-               url = down2.content
-               print(f"crawling {fname[:50]}...")
-               manager.add_task(DownloadTask(url,fname))
-          except Exception as e:
-               print(f"Error crawling {fname}: {e}")
+          url,fname = datanodes.url(url) 
+          manager.add_task(DownloadTask(url,fname))
+     def crawl_reallyff(self,url):
+          url,fname = reallyff.url(url)
+          manager.add_task(DownloadTask(url,fname))

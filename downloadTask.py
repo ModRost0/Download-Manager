@@ -19,7 +19,6 @@ class DownloadTask():
         try:
             self.url = json.loads(urllib.parse.unquote(url))["url"]
         except Exception as e:
-            print(e)
             self.url = url
         self.speed = 0
         self.fname = fname
@@ -88,30 +87,28 @@ class DownloadTask():
     def download(self):
         try:
             bool_range = self.check_accepts_range_headers()
-            if self.total_size == 0:
-                self.initialize(self.num_of_threads)
             if bool_range != "bytes":
+                    self.total_size = int((s.get(self.url,stream=True)).headers.get('Content-Length'))
+                    print(bool_range)
                     print(f"Downloading {self.fname}...")
                     response = s.get(self.url, stream=True, timeout=(10, None))
-                    current_time = time.time()
-                    current_size = 0
                     self.status = "Downloading"
+                    threading.Thread(target=self.track_speed, daemon=True).start()
                     with open(f"../{self.fname}{TEMP_EXT}", 'ab') as f:
                         for chunk in response.iter_content(chunk_size=1024 * 1024):
                             if self.event and not self.event.is_set():
                                 print("Download paused. Waiting to resume...")
                                 self.event.wait()
+                            if self.cancel_event.is_set():
+                                self.status = "Cancelled"
+                                return
                             self.downloaded += len(chunk)
                             f.write(chunk)
-                            now = time.time()
-                            elapsed = now - current_time
-                            if elapsed >= 1:
-                                self.speed = (self.downloaded - current_size) / elapsed
-                                current_time = now
-                                current_size = self.downloaded
                     os.rename(f"../{self.fname}{TEMP_EXT}", f"../{self.fname}")
                     self.status = "Completed"
             else:
+                    if self.total_size == 0:
+                        self.initialize(self.num_of_threads)
                     print(self.chunks_data)
                     if self.status != 'Downloading' and self.status != 'Retrying':
                         for i in range(self.num_of_threads):
